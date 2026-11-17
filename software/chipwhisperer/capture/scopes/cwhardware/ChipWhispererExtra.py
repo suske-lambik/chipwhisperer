@@ -556,6 +556,52 @@ class CWExtraSettings:
         else:
             return True
 
+    # TARGET_POWER_CYCLE register (Husky only):
+    #   bytes 0-3: off-time in 10 us ticks (R/W); byte 4: write bit0=start,
+    #   bit1=abort, read bit0=busy; byte 5: feature version (0 = not supported)
+    _TARGET_POWER_CYCLE_ADDR_DEFAULT = 85
+    _TARGET_POWER_CYCLE_FEATURE_VERSION = 2
+    POWER_CYCLE_TICK_US = 10
+    POWER_CYCLE_MAX_TICKS = 0xFFFFFFFF
+
+    def _power_cycle_addr(self):
+        try:
+            return self.oa._address_str2int("TARGET_POWER_CYCLE")
+        except KeyError:
+            return self._TARGET_POWER_CYCLE_ADDR_DEFAULT
+
+    def hasTargetPowerCycle(self):
+        """Whether the FPGA bitstream supports hardware-timed target power cycling."""
+        if not self._is_husky:
+            return False
+        raw = self.oa.sendMessage(CODE_READ, self._power_cycle_addr(), Validate=False, maxResp=6)
+        return raw[5] >= self._TARGET_POWER_CYCLE_FEATURE_VERSION
+
+    def startTargetPowerCycle(self, off_ticks):
+        """Starts a hardware-timed target power cycle: power off for off_ticks
+        x 10 us, then on. Ignored by the FPGA if a cycle is already in progress."""
+        if not self._is_husky:
+            raise ValueError("For Husky only")
+        off_ticks = int(off_ticks)
+        if off_ticks < 1 or off_ticks > self.POWER_CYCLE_MAX_TICKS:
+            raise ValueError("off_ticks must be in range [1, %d]" % self.POWER_CYCLE_MAX_TICKS)
+        raw = list(int.to_bytes(off_ticks, length=4, byteorder='little')) + [0x01]
+        self.oa.sendMessage(CODE_WRITE, self._power_cycle_addr(), raw)
+
+    def abortTargetPowerCycle(self):
+        """Aborts a target power cycle in progress; power returns to the target_pwr setting."""
+        if not self._is_husky:
+            raise ValueError("For Husky only")
+        raw = self.oa.sendMessage(CODE_READ, self._power_cycle_addr(), Validate=False, maxResp=4)
+        self.oa.sendMessage(CODE_WRITE, self._power_cycle_addr(), list(raw[0:4]) + [0x02])
+
+    def getTargetPowerCycleBusy(self):
+        """Whether a hardware-timed target power cycle is in progress."""
+        if not self._is_husky:
+            return False
+        raw = self.oa.sendMessage(CODE_READ, self._power_cycle_addr(), Validate=False, maxResp=5)
+        return bool(raw[4] & 0x01)
+
     def setPin(self, enabled, pin):
         current = self.getPins()
 
@@ -1354,6 +1400,109 @@ class GPIOSettings(util.DisableNewAttr):
     @target_pwr.setter
     def target_pwr(self, power : bool):
         self.cwe.setTargetPowerState(power)
+
+    def target_power_cycle(self, wait_ms : float, blocking : bool = True, timeout_ms : int = 1000):
+        """Power-cycle the target board: power off, wait `wait_ms` milliseconds,
+        power back on. Supported by Husky only, with a recent FPGA bitstream.
+
+        Unlike toggling :class:`target_pwr` twice from Python, the off-time is
+        timed by the FPGA (10 us resolution, exact to the clock cycle), so it
+        is not affected by USB latency. Fractional values are allowed, e.g.
+        wait_ms=0.05 for 50 us; values are rounded to the nearest 10 us.
+
+        .. NOTE:: The effective off-time of the target's supply is longer than
+            wait_ms: the power switch needs time to turn off/on, and when power
+            is reapplied the soft-start ramps it up (about 0.7 ms with the
+            default settings). Very short wait_ms values may not let the
+            supply drop far enough to reset the target.
+
+        While power is off, the IO pins are handled exactly as with
+        :class:`target_pwr` = False: TIO1-4, HS2, PDID, PDIC, MOSI and SCK are
+        high-z, and nRST is high-z unless :class:`nrst_drive_poweroff` is True.
+        This prevents the target from being back-powered through its IO pins
+        (which would stop it from fully resetting). When power comes back on,
+        the pins return to their configured state and the usual soft-start
+        is applied.
+
+        .. NOTE:: `wait_ms` must be long enough for the target's supply to
+            discharge below its power-on-reset/brown-out threshold. Since the
+            IO pins are high-z, this depends only on the target's own current
+            draw and decoupling capacitance; a target in a low-power mode may
+            need tens of ms or more.
+
+        .. NOTE:: For the cleanest reset, set :class:`nrst` to 'low' and
+            :class:`nrst_drive_poweroff` to True before cycling, so that nRST
+            is held low throughout. Having nrst='high' with
+            nrst_drive_poweroff=True back-powers the target through nRST and
+            is warned against.
+
+        .. NOTE:: TIO1/TIO2 float while power is off, so the serial port may
+            receive garbage; flush the target serial buffer afterwards.
+
+        .. NOTE:: The cycle does not change :class:`target_pwr`. If target_pwr
+            is False when the cycle is started, the target stays off.
+
+        Args:
+            wait_ms (float): Off-time in milliseconds, 0.01 (10 us) to
+                about 42949672 (~11.9 hours), in steps of 0.01.
+            blocking (bool): If True, wait until power has been reapplied
+                before returning.
+            timeout_ms (int): Extra time beyond wait_ms to wait for the cycle
+                to complete when blocking.
+
+        Raises:
+            ValueError: if wait_ms is out of range or a cycle is already in
+                progress.
+            NotImplementedError: if not a Husky, or the FPGA bitstream does
+                not support this feature.
+            TimeoutError: if blocking and the cycle did not complete in time.
+        """
+        if not self._is_husky:
+            raise NotImplementedError("target_power_cycle is only supported on ChipWhisperer-Husky")
+        if not self.cwe.hasTargetPowerCycle():
+            raise NotImplementedError("FPGA bitstream does not support target_power_cycle; "
+                                      "a newer Husky bitstream is required")
+        tick_ms = self.cwe.POWER_CYCLE_TICK_US / 1000
+        ticks = round(wait_ms / tick_ms)
+        if ticks < 1 or ticks > self.cwe.POWER_CYCLE_MAX_TICKS:
+            raise ValueError("wait_ms must be in range [%g, %g]" %
+                             (tick_ms, self.cwe.POWER_CYCLE_MAX_TICKS * tick_ms))
+        if abs(ticks * tick_ms - wait_ms) > 1e-9:
+            scope_logger.warning("wait_ms=%g rounded to %g (10 us resolution)" % (wait_ms, ticks * tick_ms))
+        if self.cwe.getTargetPowerCycleBusy():
+            raise ValueError("A target power cycle is already in progress")
+        if not self.target_pwr:
+            scope_logger.warning("target_pwr is False: the target will stay off after the power cycle")
+        if self.nrst_drive_poweroff and self.nrst == 'high':
+            scope_logger.warning("nrst is driven high and nrst_drive_poweroff is True: the target may "
+                                 "be back-powered through nRST during the power cycle. "
+                                 "Consider nrst='low' or nrst_drive_poweroff=False.")
+
+        self.cwe.startTargetPowerCycle(ticks)
+
+        if blocking:
+            # sleep for most of the off-time, then poll the busy flag
+            time.sleep(ticks * tick_ms / 1000)
+            deadline = time.time() + timeout_ms / 1000
+            while self.cwe.getTargetPowerCycleBusy():
+                if time.time() > deadline:
+                    raise TimeoutError("Target power cycle did not complete")
+                time.sleep(0.001)
+
+    @property
+    def target_power_cycle_busy(self) -> bool:
+        """True while a hardware-timed :meth:`target_power_cycle` is in progress
+        (target power is off). Husky only.
+        """
+        return self.cwe.getTargetPowerCycleBusy()
+
+    def target_power_cycle_abort(self):
+        """Abort a :meth:`target_power_cycle` in progress. Power immediately
+        returns to the :class:`target_pwr` setting. Husky only.
+        """
+        if not self._is_husky:
+            raise NotImplementedError("target_power_cycle is only supported on ChipWhisperer-Husky")
+        self.cwe.abortTargetPowerCycle()
 
     @property
     def vcc_glitcht(self) -> int:

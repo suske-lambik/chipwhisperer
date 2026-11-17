@@ -356,6 +356,7 @@ Note: some register bitfields are defined in reg_clockglitch.v and reg_chipwhisp
 `define CLOCKGLITCH_POWERED_DOWN 111
 `define EDGE_TRIGGER_COUNT      113
 `define SOFTPOWER_CONTROL       91
+`define TARGET_POWER_CYCLE      85
 
 `define NUM_TRIGGERS_STAT       14
 `define NUM_TRIGGERS_DATA       18
@@ -386,7 +387,6 @@ Note: some register bitfields are defined in reg_clockglitch.v and reg_chipwhisp
 //`define UNUSED_ADDRESS 28
 //`define UNUSED_ADDRESS 47
 //`define UNUSED_ADDRESS 70
-//`define UNUSED_ADDRESS 85
 //`define UNUSED_ADDRESS 106
 //`define UNUSED_ADDRESS 94
 //`define UNUSED_ADDRESS 97
