@@ -559,22 +559,15 @@ class CWExtraSettings:
     # TARGET_POWER_CYCLE register (Husky only):
     #   bytes 0-3: off-time in 10 us ticks (R/W); byte 4: write bit0=start,
     #   bit1=abort, read bit0=busy; byte 5: feature version (0 = not supported)
-    _TARGET_POWER_CYCLE_ADDR_DEFAULT = 85
-    _TARGET_POWER_CYCLE_FEATURE_VERSION = 2
+    _TARGET_POWER_CYCLE_FEATURE_VERSION = 1
     POWER_CYCLE_TICK_US = 10
     POWER_CYCLE_MAX_TICKS = 0xFFFFFFFF
-
-    def _power_cycle_addr(self):
-        try:
-            return self.oa._address_str2int("TARGET_POWER_CYCLE")
-        except KeyError:
-            return self._TARGET_POWER_CYCLE_ADDR_DEFAULT
 
     def hasTargetPowerCycle(self):
         """Whether the FPGA bitstream supports hardware-timed target power cycling."""
         if not self._is_husky:
             return False
-        raw = self.oa.sendMessage(CODE_READ, self._power_cycle_addr(), Validate=False, maxResp=6)
+        raw = self.oa.sendMessage(CODE_READ, "TARGET_POWER_CYCLE", Validate=False, maxResp=6)
         return raw[5] >= self._TARGET_POWER_CYCLE_FEATURE_VERSION
 
     def startTargetPowerCycle(self, off_ticks):
@@ -586,20 +579,20 @@ class CWExtraSettings:
         if off_ticks < 1 or off_ticks > self.POWER_CYCLE_MAX_TICKS:
             raise ValueError("off_ticks must be in range [1, %d]" % self.POWER_CYCLE_MAX_TICKS)
         raw = list(int.to_bytes(off_ticks, length=4, byteorder='little')) + [0x01]
-        self.oa.sendMessage(CODE_WRITE, self._power_cycle_addr(), raw)
+        self.oa.sendMessage(CODE_WRITE, "TARGET_POWER_CYCLE", raw)
 
     def abortTargetPowerCycle(self):
         """Aborts a target power cycle in progress; power returns to the target_pwr setting."""
         if not self._is_husky:
             raise ValueError("For Husky only")
-        raw = self.oa.sendMessage(CODE_READ, self._power_cycle_addr(), Validate=False, maxResp=4)
-        self.oa.sendMessage(CODE_WRITE, self._power_cycle_addr(), list(raw[0:4]) + [0x02])
+        raw = self.oa.sendMessage(CODE_READ, "TARGET_POWER_CYCLE", Validate=False, maxResp=4)
+        self.oa.sendMessage(CODE_WRITE, "TARGET_POWER_CYCLE", list(raw[0:4]) + [0x02])
 
     def getTargetPowerCycleBusy(self):
         """Whether a hardware-timed target power cycle is in progress."""
         if not self._is_husky:
             return False
-        raw = self.oa.sendMessage(CODE_READ, self._power_cycle_addr(), Validate=False, maxResp=5)
+        raw = self.oa.sendMessage(CODE_READ, "TARGET_POWER_CYCLE", Validate=False, maxResp=5)
         return bool(raw[4] & 0x01)
 
     def setPin(self, enabled, pin):
